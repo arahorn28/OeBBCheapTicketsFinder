@@ -1,0 +1,2 @@
+tkcalendar>=1.2.0
+-e git://github.com/arahorn28/oebb.git#egg=oebb
