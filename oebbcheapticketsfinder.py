@@ -181,7 +181,6 @@ class OeBBCheapTicketsFinder:
         self.master = master
         self.queue = Queue()
         self.request_queue = PriorityQueue()
-        self.rest_till = datetime.datetime.now()
         self.routes = {}
         self.best_connections = {}
         self.oebb = OeBB()
@@ -214,6 +213,11 @@ class OeBBCheapTicketsFinder:
         # ----- "Add route" button -----
         add_but = ttk.Button(main_frame, text='Add route', command=lambda: self.RouteWindow(master, self.queue))
         add_but.pack()
+
+        # ----- Status bar -----
+        self.status = tk.StringVar()
+        tk.Label(main_frame, textvariable=self.status, bd=1, relief=tk.SUNKEN, anchor=tk.W).pack(fill=tk.X)
+        self.status.set('Waiting for task')
 
         self.master.after(200, self.event_loop)
         self.master.after(1000, self.request_starter)
@@ -398,14 +402,16 @@ class OeBBCheapTicketsFinder:
         and spawn new thread.
         """
         now = datetime.datetime.now()
-        if now < self.rest_till or self.request_queue.empty():
+        if self.request_queue.empty():
             self.master.after(1000, self.request_starter)
+            self.status.set('Task queue is empty')
             return
 
         item = self.request_queue.get()
         if item.priority > now:
             self.request_queue.put(item)
             self.master.after(1000, self.request_starter)
+            self.status.set('Next check at ' + item.priority.strftime('%H:%M'))
             return
         if item.data['route_id'] not in self.routes:
             self.master.after(1000, self.request_starter)
@@ -414,6 +420,8 @@ class OeBBCheapTicketsFinder:
                         args=(item.data, ),
                         daemon=True)
         thread.start()
+        self.status.set('Processing: ' + OeBB.station_name(item.data['route']['stations'][0]) +
+                        ' - ' + OeBB.station_name(item.data['route']['stations'][1]))
 
     def event_loop(self):
         """Process events in queue."""
@@ -449,6 +457,7 @@ class OeBBCheapTicketsFinder:
                     self.insert_connection(ev)
 
             elif ev_type == self.ACTION_FINISHED:
+                self.status.set('Cooldown')
                 self.master.after(60000, self.request_starter)
 
         self.master.after(200, self.event_loop)
