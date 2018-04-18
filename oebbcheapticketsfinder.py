@@ -272,14 +272,14 @@ class OeBBCheapTicketsFinder:
         self.queue.put((self.ACTION_FINISHED, None))
 
     @classmethod
-    def get_date_interval(cls, route, now=datetime.datetime.now()):
+    def get_date_interval(cls, route, now=datetime.datetime.now().date()):
         """Return route date interval."""
         if route['date'][0] == cls.RouteWindow.DATE_DAYS:
-            date_from = now.date()
-            date_to = now.date() + route['date'][1]
+            date_from = now
+            date_to = now + route['date'][1]
         else:
-            date_from = max(route['date'][1][0], now).date()
-            date_to = route['date'][1][1].date()
+            date_from = max(route['date'][1][0], now)
+            date_to = route['date'][1][1]
         return date_from, date_to
 
     @classmethod
