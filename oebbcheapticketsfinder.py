@@ -418,17 +418,16 @@ class OeBBCheapTicketsFinder:
         Check if time has come to get connections of the next route in queue
         and spawn new thread.
         """
-        now = datetime.datetime.now()
-        if self.request_queue.empty():
+        while not self.request_queue.empty():
+            item = self.request_queue.get()
+            if item.data['route_id'] in self.routes:
+                break
+        else:
             self.request_starter_event_id = self.master.after(1000, self.request_starter)
             self.status.set('Task queue is empty')
             return
 
-        item = self.request_queue.get()
-        if item.data['route_id'] not in self.routes:
-            self.request_starter_event_id = self.master.after(1000, self.request_starter)
-            return
-        if item.priority > now:
+        if item.priority > datetime.datetime.now():
             self.request_queue.put(item)
             self.request_starter_event_id = self.master.after(1000, self.request_starter)
             self.status.set('Next check at ' + item.priority.strftime('%H:%M'))
