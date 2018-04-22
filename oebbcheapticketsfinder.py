@@ -2,7 +2,7 @@
 
 import tkinter as tk
 import tkinter.ttk as ttk
-from threading import Thread
+from threading import Thread, Event
 from queue import Queue, PriorityQueue
 import time
 import datetime
@@ -184,6 +184,10 @@ class OeBBCheapTicketsFinder:
         self.routes = {}
         self.best_connections = {}
         self.oebb = OeBB()
+        self.stop_thread = None
+        self.current_route = None
+        self.request_starter_event_id = None
+
         master.protocol('WM_DELETE_WINDOW', self.on_close)
 
         if os.path.exists('routes'):
@@ -228,25 +232,31 @@ class OeBBCheapTicketsFinder:
         last_date = item['last_date']
         last_req = 0
         for i in range(0, 20):
+            if item['exit'].is_set():
+                self.queue.put((self.ACTION_FINISHED, item['oebb']))
+                return
+            # Get connections
             sleep_time = 1
             while True:
                 next_date = self.next_valid_date(last_date, item['route'])
                 try:
                     if i == 0 or next_date != last_date or (time.time() - last_req) > 2300:
-                        connections = self.oebb.connections(item['route']['stations'][0],
-                                                            item['route']['stations'][1],
-                                                            next_date)
+                        connections = item['oebb'].connections(item['route']['stations'][0],
+                                                               item['route']['stations'][1],
+                                                               next_date)
                     else:
-                        connections = self.oebb.next_connections(connections[-1])
+                        connections = item['oebb'].next_connections(connections[-1])
                     last_req = time.time()
                     break
                 except Exception as _:
                     time.sleep(sleep_time)
                     sleep_time = min(sleep_time + 1, 30)
+
+            # Get prices
             sleep_time = 1
             while True:
                 try:
-                    prices = self.oebb.prices(connections)
+                    prices = item['oebb'].prices(connections)
                     break
                 except:
                     time.sleep(sleep_time)
@@ -266,14 +276,16 @@ class OeBBCheapTicketsFinder:
                 item['last_date'] = None
                 self.request_queue.put(QueueItem(datetime.datetime.now() + datetime.timedelta(minutes=20),
                                                  item))
-                self.queue.put((self.ACTION_FINISHED, None))
+                item['exit'].set()
+                self.queue.put((self.ACTION_FINISHED, item['oebb']))
                 return
             last_date = OeBB.get_datetime(connections[-1]['from']['departure'])
             time.sleep(3)
         item['last_date'] = last_date
         self.request_queue.put(QueueItem(datetime.datetime.now() + datetime.timedelta(minutes=10),
                                          item))
-        self.queue.put((self.ACTION_FINISHED, None))
+        item['exit'].set()
+        self.queue.put((self.ACTION_FINISHED, item['oebb']))
 
     @classmethod
     def get_date_interval(cls, route, now=datetime.datetime.now().date()):
@@ -394,6 +406,11 @@ class OeBBCheapTicketsFinder:
             del self.routes[cur_item]
             del self.best_connections[cur_item]
             self.tree.delete(cur_item)
+            if self.current_route == cur_item:
+                self.stop_thread.set()
+                self.stop_thread = None
+                self.current_route = None
+                self.queue.put((self.ACTION_FINISHED, None))
 
     def request_starter(self):
         """Check if next route should be processed.
@@ -403,23 +420,35 @@ class OeBBCheapTicketsFinder:
         """
         now = datetime.datetime.now()
         if self.request_queue.empty():
-            self.master.after(1000, self.request_starter)
+            self.request_starter_event_id = self.master.after(1000, self.request_starter)
             self.status.set('Task queue is empty')
             return
 
         item = self.request_queue.get()
+        if item.data['route_id'] not in self.routes:
+            self.request_starter_event_id = self.master.after(1000, self.request_starter)
+            return
         if item.priority > now:
             self.request_queue.put(item)
-            self.master.after(1000, self.request_starter)
+            self.request_starter_event_id = self.master.after(1000, self.request_starter)
             self.status.set('Next check at ' + item.priority.strftime('%H:%M'))
             return
-        if item.data['route_id'] not in self.routes:
-            self.master.after(1000, self.request_starter)
-            return
+
+        if self.oebb is None:
+            item.data['oebb'] = OeBB()
+        else:
+            item.data['oebb'] = self.oebb
+            self.oebb = None
+
+        self.stop_thread = Event()
+        item.data['exit'] = self.stop_thread
+
         thread = Thread(target=self.process_route,
                         args=(item.data, ),
                         daemon=True)
         thread.start()
+        self.current_route = item.data['route_id']
+        self.request_starter_event_id = None
         self.status.set('Processing: ' + OeBB.station_name(item.data['route']['stations'][0]) +
                         ' - ' + OeBB.station_name(item.data['route']['stations'][1]))
 
@@ -458,7 +487,11 @@ class OeBBCheapTicketsFinder:
 
             elif ev_type == self.ACTION_FINISHED:
                 self.status.set('Cooldown')
-                self.master.after(60000, self.request_starter)
+                if self.oebb is None:
+                    self.oebb = ev
+                if self.request_starter_event_id is None and (self.stop_thread is None or self.stop_thread.is_set()):
+                    self.current_route = None
+                    self.request_starter_event_id = self.master.after(60000, self.request_starter)
 
         self.master.after(200, self.event_loop)
 
