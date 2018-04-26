@@ -50,7 +50,8 @@ class OeBBCheapTicketsFinder:
     ACTION_NEW_ROUTE = 0
     ACTION_NEW_CONNECTION = 1
     ACTION_FINISHED = 2
-    ACTION_EXPIRE = 3
+
+    FULL_ROUTE = -1
 
     class RouteWindow(tk.Toplevel):
         DATE_DAYS = 0
@@ -199,6 +200,23 @@ class OeBBCheapTicketsFinder:
         main_frame = tk.Frame(master)
         main_frame.pack(fill=tk.BOTH, expand=1)
 
+        # ----- Manual control -----
+        manual_frame = tk.Frame(main_frame)
+        manual_frame.pack(fill=tk.X)
+
+        # Mode selector
+        self.manual = tk.BooleanVar()
+        ttk.Checkbutton(manual_frame, text='Manual', variable=self.manual, command=self.change_mode).pack(side=tk.LEFT)
+
+        self.but_frame = tk.Frame(manual_frame)
+        self.but_frame.pack(side=tk.LEFT)
+
+        # Manual control buttons
+        ttk.Button(self.but_frame, text='Start', command=self.manual_start, state=tk.DISABLED) \
+            .pack(side=tk.LEFT, padx=5)
+        ttk.Button(self.but_frame, text='Stop', command=self.manual_stop, state=tk.DISABLED) \
+            .pack(side=tk.LEFT)
+
         # ----- Main tree view -----
         tree_columns = [('city_from', 'Origin', 100),
                         ('city_to', 'Destination', 100),
@@ -224,15 +242,19 @@ class OeBBCheapTicketsFinder:
         self.status.set('Waiting for task')
 
         self.master.after(200, self.event_loop)
-        self.master.after(1000, self.request_starter)
+        self.request_starter_event_id = self.master.after(1000, self.request_starter)
         self.master.after(60000, self.delete_old_connections)
 
     def process_route(self, item):
         """Retrieve connections that satisfies route restrictions."""
         last_date = item['last_date']
         last_req = 0
-        for i in range(0, 20):
+        i = 0
+        while True:
             if item['exit'].is_set():
+                if item['iter_limit'] != self.FULL_ROUTE:
+                    item['last_date'] = last_date
+                    self.request_queue.put(QueueItem(datetime.datetime.now(), item))
                 self.queue.put((self.ACTION_FINISHED, item['oebb']))
                 return
             # Get connections
@@ -273,17 +295,22 @@ class OeBBCheapTicketsFinder:
                                     }))
             if len(connections) == 0 or \
                self.next_valid_date(OeBB.get_datetime(connections[-1]['from']['departure']), item['route']) is None:
-                item['last_date'] = None
-                self.request_queue.put(QueueItem(datetime.datetime.now() + datetime.timedelta(minutes=20),
-                                                 item))
+                if item['iter_limit'] != self.FULL_ROUTE:
+                    item['last_date'] = None
+                    self.request_queue.put(QueueItem(datetime.datetime.now() + datetime.timedelta(minutes=30),
+                                                     item))
                 item['exit'].set()
                 self.queue.put((self.ACTION_FINISHED, item['oebb']))
                 return
             last_date = OeBB.get_datetime(connections[-1]['from']['departure'])
             time.sleep(3)
-        item['last_date'] = last_date
-        self.request_queue.put(QueueItem(datetime.datetime.now() + datetime.timedelta(minutes=10),
-                                         item))
+            i += 1
+            if item['iter_limit'] != self.FULL_ROUTE and i == item['iter_limit']:
+                break
+        if item['iter_limit'] != self.FULL_ROUTE:
+            item['last_date'] = last_date
+            self.request_queue.put(QueueItem(datetime.datetime.now() + datetime.timedelta(minutes=10),
+                                             item))
         item['exit'].set()
         self.queue.put((self.ACTION_FINISHED, item['oebb']))
 
@@ -348,7 +375,7 @@ class OeBBCheapTicketsFinder:
             self.tree.insert(route_id, 'end', values=['', '',
                                                       con_datetime.strftime('%d/%m/%Y'),
                                                       con_datetime.strftime('%H:%M'),
-                                                      int(connection['price']['price'])])
+                                                      connection['price']['price']])
 
     def insert_connection(self, item):
         """Add or update connection and update treeview if needed."""
@@ -412,6 +439,59 @@ class OeBBCheapTicketsFinder:
                 self.current_route = None
                 self.queue.put((self.ACTION_FINISHED, None))
 
+    def change_mode(self):
+        """Change current working mode."""
+        if self.manual.get():
+            if self.stop_thread is not None:
+                self.stop_thread.set()
+                self.stop_thread = None
+                self.current_route = None
+            if self.request_starter_event_id is not None:
+                self.master.after_cancel(self.request_starter_event_id)
+            self.status.set('Select task')
+            for wid in self.but_frame.winfo_children():
+                wid['state'] = tk.NORMAL
+        else:
+            for wid in self.but_frame.winfo_children():
+                wid['state'] = tk.DISABLED
+            self.request_starter()
+
+    def manual_start(self):
+        """Start route processing in manual mode."""
+        self.manual_stop()
+        cur_item = self.tree.focus()
+        if cur_item in self.tree.get_children():
+            item = {'route': self.routes[cur_item],
+                    'route_id': cur_item,
+                    'last_date': None}
+            if self.oebb is None:
+                item['oebb'] = OeBB()
+            else:
+                item['oebb'] = self.oebb
+                self.oebb = None
+
+            self.stop_thread = Event()
+            item['exit'] = self.stop_thread
+            item['iter_limit'] = self.FULL_ROUTE
+
+            thread = Thread(target=self.process_route,
+                            args=(item,),
+                            daemon=True)
+            thread.start()
+            self.current_route = item['route_id']
+            self.request_starter_event_id = None
+            self.status.set('Processing: ' + OeBB.station_name(item['route']['stations'][0]) +
+                            ' - ' + OeBB.station_name(item['route']['stations'][1]))
+
+    def manual_stop(self):
+        """Stop route processing in manual mode."""
+        if self.current_route is not None:
+            if self.stop_thread is not None:
+                self.stop_thread.set()
+                self.stop_thread = None
+            self.current_route = None
+            self.status.set('Select task')
+
     def request_starter(self):
         """Check if next route should be processed.
 
@@ -441,6 +521,7 @@ class OeBBCheapTicketsFinder:
 
         self.stop_thread = Event()
         item.data['exit'] = self.stop_thread
+        item.data['iter_limit'] = 20
 
         thread = Thread(target=self.process_route,
                         args=(item.data, ),
@@ -485,12 +566,15 @@ class OeBBCheapTicketsFinder:
                     self.insert_connection(ev)
 
             elif ev_type == self.ACTION_FINISHED:
-                self.status.set('Cooldown')
                 if self.oebb is None:
                     self.oebb = ev
-                if self.request_starter_event_id is None and (self.stop_thread is None or self.stop_thread.is_set()):
+                if self.manual.get():
+                    if self.current_route is None:
+                        self.status.set('Select task')
+                elif self.request_starter_event_id is None and (self.stop_thread is None or self.stop_thread.is_set()):
                     self.current_route = None
-                    self.request_starter_event_id = self.master.after(60000, self.request_starter)
+                    self.request_starter_event_id = self.master.after(30000, self.request_starter)
+                    self.status.set('Cooldown')
 
         self.master.after(200, self.event_loop)
 
